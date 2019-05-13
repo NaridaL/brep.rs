@@ -1,0 +1,19 @@
+[package]
+name = "brep"
+version = "0.1.0"
+authors = ["Adrian Leonhard <adrianleonhard@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+num-traits = "0.2.6"
+bit-vec = "0.5.1"
+rand = "0.6.5"
+itertools = "0.8.0"
+time-test = "0.2.1"
+
+[profile.test]
+opt-level = 3
+
+
+[profile.bench]
+debug = true
