@@ -9,7 +9,6 @@ use std::iter::FromIterator;
 pub fn earcut(data: &[P2], hole_indices: &[usize], dim: u8) {
 	let has_holes = !hole_indices.is_empty();
 	let e = |i: usize| data[i];
-	// let outerLen = holeIndices.get(0).unwrap_or(data.len()*dim);
 	let nv = data.len();
 	let mut data2 = Vec::with_capacity(nv + hole_indices.len() + 2);
 	data2.extend_from_slice(data);
@@ -26,42 +25,91 @@ pub fn earcut(data: &[P2], hole_indices: &[usize], dim: u8) {
 		next_unused_index[end - 1] = start;
 	}
 
-	struct TriangleCycleIterator<'a> {
-		a: P2,
-		b: P2,
-		c: P2,
-		i: std::slice::Iter<'a, P2>,
+	struct TriangleCycleIterator<'a, T: Copy> {
+		w: (T, T, T),
+		i: std::slice::Iter<'a, T>,
 	}
-	impl TriangleCycleIterator {
-		fn new(data: &[P2]) -> TriangleCycleIterator {
+	impl<'a, T: Copy> TriangleCycleIterator<'a, T> {
+		fn new(data: &[T]) -> TriangleCycleIterator<T> {
 			TriangleCycleIterator {
-				a: (0.0, 0.0),
-				b: data[data.len() - 2],
-				c: data[data.len() - 1],
+				w: (
+					data[data.len() - 3],
+					data[data.len() - 2],
+					data[data.len() - 1],
+				),
 				i: data.iter(),
 			}
 		}
 	}
-	impl Iterator for TriangleCycleIterator {
-		type Item = P2;
-		fn next(self) -> P2 {}
+	impl<'a, T: Copy> Iterator for TriangleCycleIterator<'a, T> {
+		type Item = (T, T, T);
+		fn next(&mut self) -> Option<(T, T, T)> {
+			self.i.next().map(|next| {
+				self.w.0 = self.w.1;
+				self.w.1 = self.w.2;
+				self.w.2 = *next;
+
+				self.w
+			})
+		}
 	}
 
-	let mut is_convex = BitVec::from_fn(nv, |i| {
-		triangle_is_convex(e((i + nv - 1) % nv), e(i), e((i + 1) % nv))
-	});
-	// BitVec::capa
+	let mut is_convex = BitVec::with_capacity(data2.len());
+	for i in 0..outer_loop_end {
+		is_convex.push(triangle_is_convex(
+			e((i + outer_loop_end - 1) % outer_loop_end),
+			e(i),
+			e((i + 1) % outer_loop_end),
+		))
+	}
 
 	for (i, &start) in hole_indices.iter().enumerate() {
 		let end = hole_indices.get(i + 1).cloned().unwrap_or(data.len());
 		next_unused_index[end - 1] = start;
-		let left_most_v = data[start..end].iter().ord_subset_min_by_key(|(x, _)| x);
-		// find_hole_bridge(
-		// 	next_unused_index,
-		// 	is_convex: &BitVec,
-		// 	hole_left_most: usize,
-		// 	e: impl Fn(usize) -> (f64, f64),
-		// );
+		let hole_data = &data[start..end];
+		let hole_i = start
+			+ hole_data
+				.iter()
+				.enumerate()
+				.ord_subset_min_by_key(|(_, (x, _))| x)
+				.unwrap()
+				.0;
+		let hole_i_prev = start + ((hole_i - start) + 1) % (end - start);
+		let (bridge_i_prev, bridge_i) =
+			find_hole_bridge(&next_unused_index, &is_convex, hole_i, e).unwrap();
+
+		// bridge_i_prev -> bridge_i -> bridge_i_next and
+		// hole_i_prev -> hole_i -> hole_i_next
+		// become
+		// bridge_i_prev -> bridge_i -> hole_i2 -> hole_i_next
+		// hole_i_prev -> hole_i -> bridge_i2 -> bridge_i_next
+		let bridge_i_next = next_unused_index[bridge_i];
+		let hole_i_next = next_unused_index[hole_i];
+
+		let hole_i2 = data2.len();
+		next_unused_index[bridge_i] = hole_i2;
+		data2.push(e(hole_i));
+		next_unused_index.push(hole_i_next);
+
+		let bridge_i2 = data2.len();
+		next_unused_index[hole_i] = bridge_i2;
+		data2.push(e(bridge_i));
+		next_unused_index.push(bridge_i_next);
+
+		is_convex.set(
+			bridge_i,
+			triangle_is_convex(e(bridge_i_prev), e(bridge_i), e(hole_i2)),
+		);
+		is_convex.set(
+			hole_i,
+			triangle_is_convex(e(hole_i_prev), e(hole_i), e(bridge_i2)),
+		);
+		is_convex.push(triangle_is_convex(e(bridge_i), e(hole_i2), e(hole_i_next)));
+		is_convex.push(triangle_is_convex(
+			e(hole_i),
+			e(bridge_i2),
+			e(bridge_i_next),
+		));
 	}
 }
 
@@ -496,14 +544,66 @@ fn interleave(a: u16, b: u16) -> u32 {
 	bit_space_out(a) | (bit_space_out(b) << 1)
 }
 
+// fn cycle_windows<T: Copy, K: PartialEq>(
+// 	into_iter: impl IntoIterator<Item = T>,
+// 	key: impl Fn(T) -> K,
+// ) -> impl Iterator<Item = (T, T, T)> {
+// 	let mut iter = into_iter.into_iter();
+// 	let stop: T = iter.next().unwrap();
+// 	let stop_key = key(stop);
+// 	let mut a = stop;
+// 	let mut b = iter.next().unwrap();
+// 	let mut c = iter.next().unwrap();
+// 	std::iter::from_fn(move || {
+// 		let tuple = (a, b, c);
+// 			a = b;
+// 			b = c;
+// 			c = iter.next().unwrap();
+
+// 		if key(b) == stop_key {
+// 			None
+// 		} else {
+// 			Some((a, b, c))
+// 		}
+// 	})
+// }
+fn cycle_windows<T: Copy, K: PartialEq, R>(
+	into_iter: impl IntoIterator<Item = T>,
+	key: impl Fn(T) -> K,
+	mut f: impl FnMut([T; 3]) -> Option<R>,
+) -> Option<R> {
+	let mut iter = into_iter.into_iter();
+
+	let mut a = iter.next().unwrap();
+	let mut b = iter.next().unwrap();
+	let mut c = iter.next().unwrap();
+
+	let stop = a;
+	let stop_key = key(stop);
+	loop {
+		if let Some(x) = f([a, b, c]) {
+			return Some(x);
+		};
+
+		a = b;
+		b = c;
+		c = iter.next().unwrap();
+		if key(a) == stop_key {
+			return None;
+		}
+	}
+}
+
 // David Eberly's algorithm for finding a bridge between hole and outer polygon
+// return (i_prev, i), where i the the bridge point, and i_prev is the point preceding
+// the bridge point
 fn find_hole_bridge(
 	next_unused_index: &[usize],
 	is_convex: &BitVec,
 	hole_left_most: usize,
 	e: impl Fn(usize) -> (f64, f64),
-) -> Option<usize> {
-	let (hx, hy) = e(hole_left_most); // hole x/y
+) -> Option<(usize, usize)> {
+	let (hole_point_x, hole_point_y) = e(hole_left_most); // hole x/y
 	let mut pi = 0;
 	// x at which the ray from hole_left_most in -x direction intersects nearest segment
 	let mut qx = -std::f64::INFINITY;
@@ -511,27 +611,37 @@ fn find_hole_bridge(
 
 	// find a segment intersected by a ray from the hole's leftmost point to the left;
 	// segment's endpoint with lesser x will be potential connection point
-	loop {
-		let (px, py) = e(pi);
-		let pi_next = next_unused_index[pi];
-		let (p_next_x, p_next_y) = e(pi_next);
-
-		if p_next_y <= hy && hy <= py && p_next_y != py {
-			let x = px + (hy - py) * (p_next_x - px) / (p_next_y - py);
-			if x <= hx && x > qx {
-				qx = x;
-				if x == hx {
-					return Some(if hy == py { pi } else { pi_next });
+	if let Some(xxx) = cycle_windows(
+		std::iter::repeat_with(|| {
+			pi = next_unused_index[pi];
+			pi
+		})
+		.map(|i| (i, e(i))),
+		|(i, _)| i,
+		|[(i_prev, _), (i, (px, py)), (i_next, (p_next_x, p_next_y))]| {
+			if p_next_y <= hole_point_y && hole_point_y <= py && p_next_y != py {
+				let x = px + (hole_point_y - py) * (p_next_x - px) / (p_next_y - py);
+				if x <= hole_point_x && x > qx {
+					qx = x;
+					if x == hole_point_x {
+						return Some(if hole_point_y == py {
+							(i_prev, i)
+						} else {
+							(i, i_next)
+						});
+					}
+					m = Some(if px < p_next_x {
+						(i_prev, i)
+					} else {
+						(i, i_next)
+					})
 				}
-				m = Some(if px < p_next_x { pi } else { pi_next })
 			}
-		}
-		pi = pi_next;
-		if pi == 0 {
-			break;
-		};
-	}
-
+			None
+		},
+	) {
+		return Some(xxx);
+	};
 	m.map(|mut m| {
 		// look for points inside the triangle of hole point, segment intersection and endpoint;
 		// if there are no points found, we have a valid connection;
@@ -541,33 +651,41 @@ fn find_hole_bridge(
 		let mut tan_min = INF;
 
 		// p = m.next;
-		let (mx, my) = e(m);
+		let (mut mi_prev, mut mi) = m;
+		let (mut pi_prev, mut pi) = m;
+		let (mx, my) = e(mi);
 
-		while pi != m {
+		loop {
+			pi_prev = pi;
+			pi = next_unused_index[pi];
+
+			if pi == mi {
+				break;
+			}
+
 			let (px, py) = e(pi);
-			if hx >= px
-				&& px >= mx && hx != px
+			if hole_point_x >= px
+				&& px >= mx && hole_point_x != px
 				&& triangle_contains_point(
-					if hy < my { hx } else { qx },
-					hy,
+					if hole_point_y < my { hole_point_x } else { qx },
+					hole_point_y,
 					mx,
 					my,
-					if hy < my { qx } else { hx },
-					hy,
+					if hole_point_y < my { qx } else { hole_point_x },
+					hole_point_y,
 					(px, py),
 				) {
-				let tan = (hy - py).abs() / (hx - px); // tangential
+				let tan = (hole_point_y - py).abs() / (hole_point_x - px); // tangential
 
 				if (tan < tan_min || (tan == tan_min && px > mx)) && !is_convex[pi] {
-					m = pi;
+					mi = pi;
+					mi_prev = pi_prev;
 					tan_min = tan;
 				}
 			}
-
-			let pi_next = next_unused_index[pi];
 		}
 
-		m
+		(mi_prev, mi)
 	})
 }
 type M2 = (f64, f64, f64, f64);
@@ -744,6 +862,23 @@ mod test {
 		}
 		write_svg(&vertices, &triangles, "-1.2 -1.2 2.4 2.4").unwrap();
 		assert_eq!(triangles.len(), 3 * (vertices.len() / 2 - 2));
+	}
+	#[test]
+	fn cycle_windows_test() {
+		let repeating = itertools::unfold(-1, |x| {
+			*x = (*x + 1) % 4;
+			Some(*x)
+		});
+		let mut actual = Vec::new();
+		cycle_windows(
+			repeating,
+			|x| x,
+			|arr| {
+				actual.push(arr);
+				None::<()>
+			},
+		);
+		assert_eq!(actual, vec![[0, 1, 2], [1, 2, 3], [2, 3, 0], [3, 0, 1]]);
 	}
 
 	#[test]
