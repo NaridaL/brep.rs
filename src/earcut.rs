@@ -1,32 +1,114 @@
 use bit_vec::BitVec;
 use itertools::Itertools;
 use num_traits::real::Real;
+use ord_subset::OrdSubsetIterExt;
 use std::fs::File;
 use std::io::Write;
 use std::iter::FromIterator;
 
-pub fn earcut(data: &[f64], hole_indices: &[usize], dim: u8) {
+pub fn earcut(data: &[P2], hole_indices: &[usize], dim: u8) {
 	let has_holes = !hole_indices.is_empty();
+	let e = |i: usize| data[i];
 	// let outerLen = holeIndices.get(0).unwrap_or(data.len()*dim);
+	let nv = data.len();
+	let mut data2 = Vec::with_capacity(nv + hole_indices.len() + 2);
+	data2.extend_from_slice(data);
+	data2[0..nv].copy_from_slice(data);
+
+	let mut next_unused_index = Vec::with_capacity(data2.len());
+	for i in 0..nv {
+		next_unused_index.push(i + 1);
+	}
+	let outer_loop_end = hole_indices.get(0).cloned().unwrap_or(data.len());
+	next_unused_index[outer_loop_end - 1] = 0;
+	for (i, &start) in hole_indices.iter().enumerate() {
+		let end = hole_indices.get(i + 1).cloned().unwrap_or(data.len());
+		next_unused_index[end - 1] = start;
+	}
+
+	struct TriangleCycleIterator<'a> {
+		a: P2,
+		b: P2,
+		c: P2,
+		i: std::slice::Iter<'a, P2>,
+	}
+	impl TriangleCycleIterator {
+		fn new(data: &[P2]) -> TriangleCycleIterator {
+			TriangleCycleIterator {
+				a: (0.0, 0.0),
+				b: data[data.len() - 2],
+				c: data[data.len() - 1],
+				i: data.iter(),
+			}
+		}
+	}
+	impl Iterator for TriangleCycleIterator {
+		type Item = P2;
+		fn next(self) -> P2 {}
+	}
+
+	let mut is_convex = BitVec::from_fn(nv, |i| {
+		triangle_is_convex(e((i + nv - 1) % nv), e(i), e((i + 1) % nv))
+	});
+	// BitVec::capa
+
+	for (i, &start) in hole_indices.iter().enumerate() {
+		let end = hole_indices.get(i + 1).cloned().unwrap_or(data.len());
+		next_unused_index[end - 1] = start;
+		let left_most_v = data[start..end].iter().ord_subset_min_by_key(|(x, _)| x);
+		// find_hole_bridge(
+		// 	next_unused_index,
+		// 	is_convex: &BitVec,
+		// 	hole_left_most: usize,
+		// 	e: impl Fn(usize) -> (f64, f64),
+		// );
+	}
+}
+
+fn archimedean(steps: usize, start: f64, turns: f64) -> impl Iterator<Item = (f64, f64)> {
+	assert_ne!(steps, 0, "Steps should be at least 1.");
+	let turns_per_step = (turns - start) / steps as f64;
+	(0..=steps).map(move |i| {
+		let rad = start + (i as f64 * turns_per_step);
+		(rad * rad.cos(), rad * rad.abs().sin())
+	})
+}
+
+static PI: f64 = std::f64::consts::PI;
+static TAU: f64 = PI * 2.0;
+
+fn apply(p: P2, m: (f64, f64, f64, f64)) -> P2 {
+	let (x, y) = p;
+	let (a, b, c, d) = m;
+	(a * x + b * y, c * x + d * y)
+}
+
+fn multi_archi(center_distance: f64, num: usize) -> impl Iterator<Item = (f64, f64)> {
+	// const center_distance: f64 = 14.0;
+	// const num: usize = 5;
+	fn rot(x: f64) -> (f64, f64, f64, f64) {
+		(x.cos(), -x.sin(), x.sin(), x.cos())
+	}
+
+	let closures = (0..num).map(move |i| {
+		move |(x, y)| {
+			let trans = (x + center_distance, y);
+			let mat = rot(TAU * i as f64 / num as f64);
+			apply(trans, mat)
+		}
+	});
+	closures.flat_map(|c| archimedean(128, -7.0, 9.0).map(c))
 }
 
 fn earcut_no_holes(data: &[f64]) -> Vec<usize> {
 	let modulo = |a: usize, b: usize| -> usize { ((a % b) + b) % b };
 	let nv = data.len() / 2;
-	let e = |i: usize| data[i];
+	let e = |i: usize| (data[i * 2], data[i * 2 + 1]);
 	let mut triangles: Vec<usize> = Vec::with_capacity(3 * (nv - 2));
-	let convex = |i, j, k| {
-		triangle_is_convex(
-			e(i * 2),
-			e(i * 2 + 1),
-			e(j * 2),
-			e(j * 2 + 1),
-			e(k * 2),
-			e(k * 2 + 1),
-		)
-	};
-	let mut is_convex = BitVec::from_fn(nv, |i| convex((i + nv - 1) % nv, i, (i + 1) % nv));
-	println!("is_convex {:?}", is_convex);
+	let mut is_convex = BitVec::from_fn(nv, |i| {
+		triangle_is_convex(e((i + nv - 1) % nv), e(i), e((i + 1) % nv))
+	});
+	// println!("is_convex {:?}", is_convex);
 	let mut is_used = BitVec::from_elem(nv, false);
 	let mut vertices_left = nv;
 	let mut current_indexes = [0, 1, 2, 3 % nv];
@@ -79,43 +161,37 @@ fn earcut_no_holes(data: &[f64]) -> Vec<usize> {
 		x
 	};
 
-	fn is_ear<F>(is_convex: &BitVec, is_used: &BitVec, e: F, i: usize, j: usize, k: usize) -> bool
-	where
-		F: Fn(usize) -> f64,
-	{
+	fn is_ear<F>(
+		is_convex: &BitVec,
+		is_used: &BitVec,
+		e: impl Fn(usize) -> (f64, f64),
+		i: usize,
+		j: usize,
+		k: usize,
+	) -> bool {
 		// println!("is_convex {:?}", is_convex[j]);
+		let (ax, ay) = e(i);
+		let (bx, by) = e(j);
+		let (cx, cy) = e(k);
 		is_convex[j]
 			&& is_used.iter().enumerate().all(|(vi, used)| {
 				used || vi == i
 					|| vi == j || vi == k
-					|| !triangle_contains_point(
-						e(i * 2),
-						e(i * 2 + 1),
-						e(j * 2),
-						e(j * 2 + 1),
-						e(k * 2),
-						e(k * 2 + 1),
-						e(vi * 2),
-						e(vi * 2 + 1),
-					)
+					|| !triangle_contains_point(ax, ay, bx, by, cx, cy, e(vi))
 			})
 	};
 
-	fn is_ear_zorder<F, G>(
+	fn is_ear_zorder(
 		is_convex: &BitVec,
 		is_used: &BitVec,
 		z_order_values: &[(usize, u32)],
-		z_order_val: G,
+		z_order_val: impl Fn((f64, f64)) -> u32,
 		z_index_arr: &[usize],
-		e: F,
+		e: impl Fn(usize) -> (f64, f64),
 		i: usize,
 		j: usize,
 		k: usize,
-	) -> bool
-	where
-		F: Fn(usize) -> f64,
-		G: Fn((f64, f64)) -> u32,
-	{
+	) -> bool {
 		if !is_convex[j] {
 			return false;
 		}
@@ -124,12 +200,9 @@ fn earcut_no_holes(data: &[f64]) -> Vec<usize> {
 
 		let nv = z_order_values.len();
 
-		let ax = e(i * 2);
-		let ay = e(i * 2 + 1);
-		let bx = e(j * 2);
-		let by = e(j * 2 + 1);
-		let cx = e(k * 2);
-		let cy = e(k * 2 + 1);
+		let (ax, ay) = e(i);
+		let (bx, by) = e(j);
+		let (cx, cy) = e(k);
 
 		let min_triang_x = ax.min(bx).min(cx);
 		let max_triang_x = ax.max(bx).max(cx);
@@ -138,6 +211,10 @@ fn earcut_no_holes(data: &[f64]) -> Vec<usize> {
 
 		let min_triang_z = z_order_val((min_triang_x, min_triang_y));
 		let max_triang_z = z_order_val((max_triang_x, max_triang_y));
+		let min_triang_z_x = min_triang_z & 0x5555_5555;
+		let min_triang_z_y = min_triang_z & 0xAAAA_AAAA;
+		let max_triang_z_x = max_triang_z & 0x5555_5555;
+		let max_triang_z_y = max_triang_z & 0xAAAA_AAAA;
 		// let min_triang_z = 0;
 		// let max_triang_z = u32::max_value();
 
@@ -161,11 +238,17 @@ fn earcut_no_holes(data: &[f64]) -> Vec<usize> {
 		// });
 		// let mut tested = Vec::new();
 		// (0..nv).all(|vi| {
-		let result = a().interleave(b()).all(|(vi, _)| {
+		let result = a().interleave(b()).all(|(vi, z)| {
+			let z_order_x_part = z & 0x5555_5555;
+			let z_order_y_part = z & 0xAAAA_AAAA;
 			// tested.push(vi);
 			is_used[vi]
 				|| vi == i || vi == j
-				|| vi == k || !triangle_contains_point(ax, ay, bx, by, cx, cy, e(vi * 2), e(vi * 2 + 1))
+				|| vi == k || z_order_x_part > max_triang_z_x
+				|| z_order_x_part < min_triang_z_x
+				|| z_order_y_part > max_triang_z_y
+				|| z_order_y_part < min_triang_z_y
+				|| !triangle_contains_point(ax, ay, bx, by, cx, cy, e(vi))
 		});
 		// if correct_answer != result {
 		// 	println!(
@@ -271,7 +354,7 @@ fn earcut_no_holes(data: &[f64]) -> Vec<usize> {
 					println!("endless loop");
 					is_used.iter().enumerate().for_each(|(vi, used)| {
 						if !used {
-							println!("{} {}", e(vi * 2), e(vi * 2 + 1));
+							println!("{:?}", e(vi));
 						}
 					});
 					return triangles;
@@ -294,21 +377,25 @@ fn earcut_no_holes(data: &[f64]) -> Vec<usize> {
 		{
 			let [h, i, j, k] = current_indexes;
 			// fix convex values at i and j (previously k)
-			is_convex.set(i, is_convex[i] || convex(h, i, j));
-			is_convex.set(j, is_convex[j] || convex(i, j, k));
+			is_convex.set(i, is_convex[i] || triangle_is_convex(e(h), e(i), e(j)));
+			is_convex.set(j, is_convex[j] || triangle_is_convex(e(i), e(j), e(k)));
 		}
-		current_indexes[0] = current_indexes[1];
-		current_indexes[1] = current_indexes[2];
-		current_indexes[2] = current_indexes[3];
-		current_indexes[3] = unused_index_after(&next_unused_index, current_indexes[2]);
+		// current_indexes[0] = current_indexes[1];
+		// current_indexes[1] = current_indexes[2];
+		// current_indexes[2] = current_indexes[3];
+		// current_indexes[3] = unused_index_after(&next_unused_index, current_indexes[2]);
 	}
 	triangles
 }
 
-fn triangle_is_convex(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> bool {
+fn double_area((ax, ay): P2, (bx, by): P2, (cx, cy): P2) -> f64 {
+	(bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+}
+
+fn triangle_is_convex(a: P2, b: P2, c: P2) -> bool {
 	// println!("{} {} {} {} {} {} ", ax, ay, bx, by, cx, cy);
 	// println!("{}", (bx - ax) * (cy - ay) - (by - ay) * (cx - ax));
-	(bx - ax) * (cy - ay) - (by - ay) * (cx - ax) > 0.0
+	double_area(a, b, c) > 0.0
 }
 
 fn triangle_contains_point(
@@ -318,8 +405,7 @@ fn triangle_contains_point(
 	by: f64,
 	cx: f64,
 	cy: f64,
-	px: f64,
-	py: f64,
+	(px, py): P2,
 ) -> bool {
 	// println!(
 	// 	"triangle_contains_point {} {} {} {} {} {}  {} {} ",
@@ -337,20 +423,14 @@ fn foo(x: f64, y: f64, a: f64, c: f64) -> f64 {
 		- c
 }
 
-fn ddd<F>(f: F, v: P2) -> (f64, f64)
-where
-	F: Fn(f64, f64) -> f64,
-{
+fn ddd(f: impl Fn(f64, f64) -> f64, v: P2) -> (f64, f64) {
 	let eps = 1e-6;
 	let (x, y) = v;
 	let fxy = f(x, y);
 	((f(x + eps, y) - fxy) / eps, (f(x, y + eps) - fxy) / eps)
 }
 
-fn curve_point<F>(f: &F, start: (f64, f64)) -> (f64, f64)
-where
-	F: Fn(f64, f64) -> f64,
-{
+fn curve_point(f: &impl Fn(f64, f64) -> f64, start: (f64, f64)) -> (f64, f64) {
 	let mut p = start;
 	for _ in 0..8 {
 		let (px, py) = p;
@@ -380,31 +460,183 @@ fn length(v: P2) -> f64 {
 	(x * x + y * y).sqrt()
 }
 
-fn interleave(a: u16, b: u16) -> u32 {
+fn bit_space_out(a: u16) -> u32 {
 	let mut x: u32 = a.into();
-	let mut y: u32 = b.into();
-
 	x = (x | (x << 8)) & 0x00FF00FF;
 	x = (x | (x << 4)) & 0x0F0F0F0F;
 	x = (x | (x << 2)) & 0x33333333;
 	x = (x | (x << 1)) & 0x55555555;
-
-	y = (y | (y << 8)) & 0x00FF00FF;
-	y = (y | (y << 4)) & 0x0F0F0F0F;
-	y = (y | (y << 2)) & 0x33333333;
-	y = (y | (y << 1)) & 0x55555555;
-
-	x | (y << 1)
+	x
 }
 
-fn followAlgorithm2d<F>(
-	ic: &F,
+struct AABB2 {
+	min: P2,
+	max: P2,
+}
+static INF: f64 = std::f64::INFINITY;
+impl AABB2 {
+	fn new() -> AABB2 {
+		AABB2 {
+			min: (INF, INF),
+			max: (-INF, -INF),
+		}
+	}
+	fn add_iter(self: &mut Self, iter: impl IntoIterator<Item = P2>) {
+		for (x, y) in iter {
+			self.min.0 = self.min.0.min(x);
+			self.max.0 = self.max.0.max(x);
+
+			self.min.1 = self.min.1.min(y);
+			self.max.1 = self.max.1.max(y);
+		}
+	}
+}
+
+fn interleave(a: u16, b: u16) -> u32 {
+	bit_space_out(a) | (bit_space_out(b) << 1)
+}
+
+// David Eberly's algorithm for finding a bridge between hole and outer polygon
+fn find_hole_bridge(
+	next_unused_index: &[usize],
+	is_convex: &BitVec,
+	hole_left_most: usize,
+	e: impl Fn(usize) -> (f64, f64),
+) -> Option<usize> {
+	let (hx, hy) = e(hole_left_most); // hole x/y
+	let mut pi = 0;
+	// x at which the ray from hole_left_most in -x direction intersects nearest segment
+	let mut qx = -std::f64::INFINITY;
+	let mut m = None;
+
+	// find a segment intersected by a ray from the hole's leftmost point to the left;
+	// segment's endpoint with lesser x will be potential connection point
+	loop {
+		let (px, py) = e(pi);
+		let pi_next = next_unused_index[pi];
+		let (p_next_x, p_next_y) = e(pi_next);
+
+		if p_next_y <= hy && hy <= py && p_next_y != py {
+			let x = px + (hy - py) * (p_next_x - px) / (p_next_y - py);
+			if x <= hx && x > qx {
+				qx = x;
+				if x == hx {
+					return Some(if hy == py { pi } else { pi_next });
+				}
+				m = Some(if px < p_next_x { pi } else { pi_next })
+			}
+		}
+		pi = pi_next;
+		if pi == 0 {
+			break;
+		};
+	}
+
+	m.map(|mut m| {
+		// look for points inside the triangle of hole point, segment intersection and endpoint;
+		// if there are no points found, we have a valid connection;
+		// otherwise choose the point of the minimum angle with the ray as connection point
+
+		let stop = m;
+		let mut tan_min = INF;
+
+		// p = m.next;
+		let (mx, my) = e(m);
+
+		while pi != m {
+			let (px, py) = e(pi);
+			if hx >= px
+				&& px >= mx && hx != px
+				&& triangle_contains_point(
+					if hy < my { hx } else { qx },
+					hy,
+					mx,
+					my,
+					if hy < my { qx } else { hx },
+					hy,
+					(px, py),
+				) {
+				let tan = (hy - py).abs() / (hx - px); // tangential
+
+				if (tan < tan_min || (tan == tan_min && px > mx)) && !is_convex[pi] {
+					m = pi;
+					tan_min = tan;
+				}
+			}
+
+			let pi_next = next_unused_index[pi];
+		}
+
+		m
+	})
+}
+type M2 = (f64, f64, f64, f64);
+fn mm((a, b, c, d): M2, (e, f, g, h): M2) -> M2 {
+	(a * e + b * g, a * f + b * h, c * e + d * g, c * f + d * h)
+}
+
+fn menger_wipe(iterations: u32) -> (Vec<P2>, Vec<usize>) {
+	fn fn_menger_recursive(
+		points: &mut Vec<P2>,
+		hole_starts: &mut Vec<usize>,
+		lvl: u32,
+		(ox, oy): P2,
+		s: f64,
+	) {
+		println!("{:?} {:?}", (ox, oy), s);
+		hole_starts.push(points.len());
+		for (x, y) in &[
+			(1.0 / 3.0, 1.0 / 3.0),
+			(1.0 / 3.0, 2.0 / 3.0),
+			(2.0 / 3.0, 2.0 / 3.0),
+			(2.0 / 3.0, 1.0 / 3.0),
+		] {
+			points.push((ox + s * x, oy + s * y));
+		}
+
+		if 0 != lvl {
+			for i in 0..3 {
+				for j in 0..3 {
+					if j != 1 || i != 1 {
+						println!("i {} j {}", i, j);
+						fn_menger_recursive(
+							points,
+							hole_starts,
+							lvl - 1,
+							(ox + (i as f64 / 3.0) * s, oy + (j as f64 / 3.0) * s),
+							s / 3.0,
+						);
+					}
+				}
+			}
+		}
+	};
+
+	let hole_count = (8usize.pow(1 + iterations) - 1) / 7;
+	let mut points = Vec::with_capacity((1 + hole_count) * 4);
+	let mut hole_starts = Vec::with_capacity(hole_count);
+	points.push((0.0, 0.0));
+	points.push((1.0, 0.0));
+	points.push((1.0, 1.0));
+	points.push((0.0, 1.0));
+	fn_menger_recursive(&mut points, &mut hole_starts, iterations, (0.0, 0.0), 1.0);
+	(points, hole_starts)
+}
+
+// check if a polygon diagonal is locally inside the polygon
+fn locallyInside(a: P2, b: P2, c: P2, k: P2) -> bool {
+	if double_area(a, b, c) < 0.0 {
+		double_area(b, k, c) >= 0.0 && double_area(b, a, k) >= 0.0
+	} else {
+		double_area(b, k, a) < 0.0 || double_area(b, c, k) < 0.0
+	}
+}
+
+fn followAlgorithm2d(
+	ic: &impl Fn(f64, f64) -> f64,
 	start_p: (f64, f64),
 	step_length: f64,
-) -> (Vec<(f64, f64)>, Vec<(f64, f64)>)
-where
-	F: Fn(f64, f64) -> f64,
-{
+) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
 	let (ddx, ddy) = ddd(ic, start_p);
 	let start_tangent = to_length((-ddy, ddx), step_length);
 	let mut i = 0;
@@ -458,6 +690,13 @@ where
 
 	//assert(points.length > 6)
 	(points, tangents)
+}
+
+use std::iter::once;
+
+fn pair_iter<T>(pair: (T, T)) -> impl Iterator<Item = T> {
+	let (a, b) = pair;
+	once(a).chain(once(b))
 }
 
 #[macro_use]
@@ -535,13 +774,14 @@ mod test {
 	use super::curve_point;
 	use super::followAlgorithm2d;
 	use super::write_point_svg;
+	use itertools::Itertools;
 
 	#[test]
 	fn tt3() {
 		let f = |x: f64, y: f64| foo(x, -y, 3.0, 0.5);
 		let start_point = curve_point(&f, (3.0, -1.0));
-		let (points, _) = followAlgorithm2d(&f, start_point, 0.001);
-		let (hole1_points, _) = followAlgorithm2d(&f, curve_point(&f, (0.1, 1.0)), 0.001);
+		let (points, _) = followAlgorithm2d(&f, start_point, 0.1);
+		// let (hole1_points, _) = followAlgorithm2d(&f, curve_point(&f, (0.1, 1.0)), 0.01);
 		println!(
 			"start_point: {:?} number_of_points  {}",
 			start_point,
@@ -553,7 +793,7 @@ mod test {
 			vertices.push(x);
 			vertices.push(y);
 		}
-		write_point_svg(&vertices, "-8 -8 16 16").unwrap();
+		write_point_svg(vertices.iter().cloned().tuples(), "-8 -8 16 16").unwrap();
 		let triangles;
 		{
 			time_test!();
@@ -561,13 +801,51 @@ mod test {
 		}
 		write_svg(&vertices, &triangles, "-8 -8 16 16").unwrap();
 	}
+
+	use super::archimedean;
+	use super::pair_iter;
+	use super::*;
+
+	#[test]
+	fn spiral() {
+		// let points = archimedean(640, -4.0, f64::PI() * 8.0)
+		let points = multi_archi(15.0, 3)
+			// .map(|(x, y)| (-x, -y))
+			// .chain(archimedean(640, f64::PI() * 8.0))
+			.collect::<Vec<(f64, f64)>>();
+		let points2 = points
+			.iter()
+			.cloned()
+			.flat_map(pair_iter)
+			.collect::<Vec<_>>();
+		let view_box = "-30 -30 60 60 ";
+		write_point_svg(points, view_box).unwrap();
+		let triangles;
+		{
+			time_test!();
+			triangles = earcut_no_holes(&points2);
+		}
+		write_svg(&points2, &triangles, view_box).unwrap();
+	}
+
+	#[test]
+	fn menger() {
+		let (points, _) = menger_wipe(3);
+		println!("{:?}", points);
+		write_point_svg(points, "-0.1 -0.1 1.2 1.2");
+	}
+
+	fn find_hole_bridge_test() {
+		// find_hole_bridge(, hole_left_most: usize, e: impl Fn(usize) -> (f64, f64))
+	}
 }
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
 	(1.0 - t) * a + t * b
 }
+use palette::{Hsl, Srgb};
 use rand::Rng;
 fn write_svg(vertices: &[f64], triangles: &[usize], view_box: &str) -> std::io::Result<()> {
-	return Ok(());
+	// return Ok(());
 	let mut file = File::create("foo.svg")?;
 	writeln!(
 		file,
@@ -578,19 +856,21 @@ fn write_svg(vertices: &[f64], triangles: &[usize], view_box: &str) -> std::io::
 		"<svg height='1000' width='1000'  viewBox='{}' xmlns='http://www.w3.org/2000/svg'>",
 		view_box
 	)?;
-	for (i, j, k) in triangles.iter().tuples() {
+	for (v, (i, j, k)) in triangles.iter().tuples().enumerate() {
+		let color = Hsl::new(v as f64 / (triangles.len() as f64 / 3.0) * 270.0, 1.0, 0.5);
+		let c2 = Srgb::from(color);
 		writeln!(
 			file,
-			"<polygon points='{},{} {},{} {},{}' style='fill:rgb({},{},{});' />",
+			"<polygon points='{},{} {},{} {},{}' style='fill:rgb({}%,{}%,{}%);stroke:black;stroke-width:0.01;' />",
 			vertices[i * 2],
 			vertices[i * 2 + 1],
 			vertices[j * 2],
 			vertices[j * 2 + 1],
 			vertices[k * 2],
 			vertices[k * 2 + 1],
-			rand::thread_rng().gen::<u8>(),
-			rand::thread_rng().gen::<u8>(),
-			rand::thread_rng().gen::<u8>(),
+			c2.red * 100.0,
+			c2.green * 100.0,
+			c2.blue * 100.0,
 		)?;
 	}
 	for i in 0..vertices.len() / 2 {
@@ -605,8 +885,11 @@ fn write_svg(vertices: &[f64], triangles: &[usize], view_box: &str) -> std::io::
 	writeln!(file, "</svg>")?;
 	Ok(())
 }
-fn write_point_svg(vertices: &[f64], view_box: &str) -> std::io::Result<()> {
-	return Ok(());
+fn write_point_svg(
+	vertices: impl IntoIterator<Item = (f64, f64)>,
+	view_box: &str,
+) -> std::io::Result<()> {
+	// return Ok(());
 	let mut file = File::create("points.svg")?;
 	writeln!(
 		file,
@@ -621,8 +904,8 @@ fn write_point_svg(vertices: &[f64], view_box: &str) -> std::io::Result<()> {
 		file,
 		"<polygon stroke-width='0.01' stroke='black' fill='none' points='"
 	)?;
-	for i in 0..vertices.len() / 2 {
-		writeln!(file, "{},{} ", vertices[i * 2], vertices[i * 2 + 1])?;
+	for (a, b) in vertices {
+		writeln!(file, "{},{}", a, b)?;
 	}
 	writeln!(file, "' /></svg>")?;
 	Ok(())

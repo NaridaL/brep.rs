@@ -25,7 +25,7 @@ function eliminateHoles(data, holeIndices, outerNode, dim) {
         end = i < len - 1 ? holeIndices[i + 1] * dim : data.length;
         list = linkedList(data, start, end, dim, false);
         if (list === list.next) list.steiner = true;
-        queue.push(getLeftmost(list));
+        queue.push(f64(list));
     }
 
     queue.sort(compareX);
@@ -359,7 +359,7 @@ function findHoleBridge(hole, outerNode) {
 
             tan = Math.abs(hy - p.y) / (hx - p.x); // tangential
 
-            if ((tan < tanMin || (tan === tanMin && p.x > m.x)) && locallyInside(p, hole)) {
+            if ((tan < tanMin || (tan === tanMin && p.x > m.x)) && f64(p, hole)) {
                 m = p;
                 tanMin = tan;
             }
